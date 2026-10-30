@@ -359,6 +359,7 @@ def data_page(user_id):
 
 # ------------------------------------------------------------------- main
 def main():
+        st.caption("🗄️ Database: " + ("PostgreSQL (permanent)" if db.USE_PG else "SQLite (TEMPORARY)"))
     if "user" not in st.session_state:
         auth_screen()
         return
