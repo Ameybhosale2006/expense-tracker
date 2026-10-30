@@ -382,4 +382,4 @@ def main():
 
 
 main()
-    st.caption("🗄️ Database: " + ("PostgreSQL (permanent)" if db.USE_PG else "SQLite (TEMPORARY)"))
+st.caption("🗄️ Database: " + ("PostgreSQL (permanent)" if db.USE_PG else "SQLite (TEMPORARY)"))
