@@ -1,12 +1,13 @@
 """Personal Expense Tracker - Streamlit app.  Run with:  streamlit run app.py"""
 import calendar
-from datetime import date
+from datetime import date, datetime, timedelta, timezone
 
 import altair as alt
 import pandas as pd
 import streamlit as st
 
 import database as db
+import sms_parser
 
 st.set_page_config(page_title="Personal Expense Tracker", page_icon="💰", layout="wide")
 db.init_db()
@@ -20,6 +21,11 @@ INCOME_CATEGORIES = ["Salary", "Freelance", "Business", "Investments", "Gift", "
 ALL_CATEGORIES = sorted(set(EXPENSE_CATEGORIES + INCOME_CATEGORIES))
 PAYMENT_METHODS = ["Cash", "UPI", "Debit Card", "Credit Card", "Net Banking", "Other"]
 TYPE_COLORS = alt.Scale(domain=["Income", "Expense"], range=["#2e9e6b", "#e0524d"])
+
+
+def today_ist() -> date:
+    """Today's date in India (the cloud server itself runs on UTC)."""
+    return datetime.now(timezone(timedelta(hours=5, minutes=30))).date()
 
 
 def money(x: float) -> str:
@@ -66,7 +72,7 @@ def auth_screen():
 def dashboard(user_id):
     st.header("📊 Monthly Dashboard")
     df = db.get_transactions(user_id)
-    today = date.today()
+    today = today_ist()
 
     c1, c2 = st.columns(2)
     years = sorted({today.year, *df["date"].dt.year.tolist()}, reverse=True)
@@ -180,23 +186,65 @@ def dashboard(user_id):
 
 
 # --------------------------------------------------------- add transaction
+def autofill_from_message():
+    """Button callback: read the pasted message and pre-fill the form below."""
+    result = sms_parser.parse_message(
+        st.session_state.get("sms_text", ""), today_ist(), EXPENSE_CATEGORIES, INCOME_CATEGORIES)
+    if not result["ok"]:
+        st.session_state["add_flash"] = ("error", result["error"])
+        return
+    tx_type = result["type"]
+    st.session_state["add_type"] = tx_type
+    st.session_state["add_date"] = result["date"] or today_ist()
+    st.session_state["add_amount"] = float(result["amount"])
+    st.session_state[f"add_category_{tx_type}"] = result["category"]
+    st.session_state["add_method"] = result["payment_method"]
+    st.session_state["add_note"] = result["note"]
+    when = result["date"].strftime("%d %b %Y") if result["date"] else "today (no date found in the message)"
+    st.session_state["add_flash"] = ("success",
+        f"Detected: **{tx_type}** of **{money(result['amount'])}** | {result['merchant'] or 'merchant not found'} | "
+        f"{result['category']} | {result['payment_method']} | {when}. "
+        "Please check the form below and tap **Save transaction**.")
+
+
 def add_page(user_id):
     st.header("➕ Add Transaction")
-    tx_type = st.radio("Type", ["Expense", "Income"], horizontal=True)
+
+    if st.session_state.pop("_clear_sms", False):      # must run before the text box is created
+        st.session_state["sms_text"] = ""
+    saved = st.session_state.pop("add_saved", None)
+    if saved:
+        st.success(saved)
+
+    with st.expander("⚡ Quick add: paste a bank / UPI / Google Pay message", expanded=True):
+        st.caption("Copy the SMS or notification you got for a payment, paste it here, and the form below "
+                   "is filled in for you. Nothing is sent anywhere; it is read inside this app only.")
+        st.text_area("Message", key="sms_text", height=110, label_visibility="collapsed",
+                     placeholder="Example: Rs.250.00 debited from A/c XX1234 on 25-10-26 to VPA swiggy@icici (UPI Ref No 123456789012)")
+        st.button("✨ Auto-fill from message", on_click=autofill_from_message)
+        flash = st.session_state.pop("add_flash", None)
+        if flash:
+            (st.success if flash[0] == "success" else st.error)(flash[1])
+
+    st.session_state.setdefault("add_date", today_ist())
+    tx_type = st.radio("Type", ["Expense", "Income"], horizontal=True, key="add_type")
     categories = EXPENSE_CATEGORIES if tx_type == "Expense" else INCOME_CATEGORIES
     with st.form("add_form", clear_on_submit=True):
         c1, c2 = st.columns(2)
-        tx_date = c1.date_input("Date", value=date.today(), max_value=date.today())
-        amount = c2.number_input(f"Amount ({CURRENCY})", min_value=0.0, step=10.0, format="%.2f")
-        category = c1.selectbox("Category", categories)
-        method = c2.selectbox("Payment method", PAYMENT_METHODS)
-        note = st.text_input("Note (optional)")
-        if st.form_submit_button("Save transaction", type="primary"):
-            if amount <= 0:
-                st.error("Amount must be greater than zero.")
-            else:
-                db.add_transaction(user_id, tx_date, tx_type, category, amount, method, note.strip())
-                st.success(f"{tx_type} of {money(amount)} saved under {category}.")
+        tx_date = c1.date_input("Date", max_value=today_ist(), key="add_date")
+        amount = c2.number_input(f"Amount ({CURRENCY})", min_value=0.0, step=10.0, format="%.2f", key="add_amount")
+        category = c1.selectbox("Category", categories, key=f"add_category_{tx_type}")
+        method = c2.selectbox("Payment method", PAYMENT_METHODS, key="add_method")
+        note = st.text_input("Note (optional)", key="add_note")
+        submitted = st.form_submit_button("Save transaction", type="primary")
+    if submitted:
+        if amount <= 0:
+            st.error("Amount must be greater than zero.")
+        else:
+            db.add_transaction(user_id, tx_date, tx_type, category, amount, method, note.strip())
+            st.session_state["add_saved"] = f"{tx_type} of {money(amount)} saved under {category}."
+            st.session_state["_clear_sms"] = True
+            st.rerun()
 
 
 # ------------------------------------------------------------ transactions
@@ -209,7 +257,7 @@ def transactions_page(user_id):
 
     with st.expander("🔍 Filters", expanded=True):
         f1, f2, f3 = st.columns(3)
-        min_d, max_d = all_df["date"].min().date(), max(all_df["date"].max().date(), date.today())
+        min_d, max_d = all_df["date"].min().date(), max(all_df["date"].max().date(), today_ist())
         rng = f1.date_input("Date range", value=(min_d, max_d), min_value=min_d, max_value=max_d)
         tx_type = f2.selectbox("Type", ["All", "Income", "Expense"])
         cats = f3.multiselect("Categories", ALL_CATEGORIES)
@@ -257,7 +305,7 @@ def transactions_page(user_id):
     row = df[df["id"] == chosen].iloc[0]
     with st.form(f"edit_form_{chosen}"):
         c1, c2 = st.columns(2)
-        e_date = c1.date_input("Date", value=row["date"].date(), max_value=date.today())
+        e_date = c1.date_input("Date", value=row["date"].date(), max_value=today_ist())
         e_amount = c2.number_input("Amount", min_value=0.01, value=float(row["amount"]), step=10.0)
         e_type = c1.selectbox("Type", ["Expense", "Income"], index=0 if row["type"] == "Expense" else 1)
         cat_options = sorted(set(ALL_CATEGORIES + [row["category"]]))
@@ -297,7 +345,7 @@ def budgets_page(user_id):
         st.info("No budgets set yet.")
         return
 
-    today = date.today()
+    today = today_ist()
     df = db.get_transactions(user_id)
     this_month = df[(df["date"].dt.year == today.year) & (df["date"].dt.month == today.month)
                     & (df["type"] == "Expense")]
@@ -382,4 +430,4 @@ def main():
 
 
 main()
-st.caption("🗄️ Database: " + ("PostgreSQL (permanent)" if db.USE_PG else "SQLite (TEMPORARY)"))
+

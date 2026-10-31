@@ -5,6 +5,7 @@ A mini project built with **Python, Streamlit, SQLite and Pandas**.
 ## Features
 - User registration & login (passwords hashed with PBKDF2 + salt)
 - Daily income / expense entry (date, amount, category, payment method, note)
+- **Quick Add:** paste a bank / UPI / Google Pay message and the form is filled in automatically (amount, debit or credit, merchant, date, category, payment method)
 - Edit and delete transactions
 - Filters: date range, type, multiple categories, text search, sorting
 - Monthly dashboard: income, expenses, balance, savings rate, change vs last month
@@ -24,12 +25,12 @@ streamlit run app.py
 2. Go to https://share.streamlit.io, click **New app**, pick the repo, branch `main`, main file `app.py`.
 3. Click **Deploy**.
 
-> Note: Streamlit Cloud storage is temporary - the SQLite file can reset when the app restarts.
-> Use **Import / Export** to back up your data regularly.
+> Set a `DATABASE_URL` secret (Neon PostgreSQL) in Streamlit Cloud, because its file storage is temporary and a SQLite file can reset when the app restarts.
 
 ## Project structure
 | File | Purpose |
 |------|---------|
 | `app.py` | Streamlit UI (pages, forms, charts) |
-| `database.py` | SQLite database functions |
+| `database.py` | Database functions (Neon PostgreSQL, SQLite fallback) |
+| `sms_parser.py` | Reads pasted bank / UPI messages for Quick Add |
 | `requirements.txt` | Python dependencies |
