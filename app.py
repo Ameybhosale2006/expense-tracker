@@ -68,19 +68,45 @@ def auth_screen():
                     st.error("That username is already taken.")
 
 
+# --------------------------------------------------- shared month / year
+def selected_period():
+    """(year, month) chosen in the sidebar. Shared by every page."""
+    today = today_ist()
+    return st.session_state.get("sel_year", today.year), st.session_state.get("sel_month", today.month)
+
+
+def shift_month(delta):
+    year, month = selected_period()
+    index = year * 12 + (month - 1) + delta
+    st.session_state["sel_year"], st.session_state["sel_month"] = index // 12, index % 12 + 1
+
+
+def reset_to_this_month():
+    today = today_ist()
+    st.session_state["sel_year"], st.session_state["sel_month"] = today.year, today.month
+
+
+def period_selector(user_id):
+    """Sidebar widgets. They are drawn on every page, so the choice never resets."""
+    today = today_ist()
+    st.session_state.setdefault("sel_year", today.year)
+    st.session_state.setdefault("sel_month", today.month)
+    data_years = db.get_transactions(user_id)["date"].dt.year.tolist()
+    years = sorted({today.year, st.session_state["sel_year"], *data_years}, reverse=True)
+    st.markdown("**📅 Month (used on all pages)**")
+    st.selectbox("Month", list(range(1, 13)), key="sel_month", format_func=lambda m: calendar.month_name[m])
+    st.selectbox("Year", years, key="sel_year")
+    b1, b2, b3 = st.columns(3)
+    b1.button("◀", on_click=shift_month, args=(-1,), help="Previous month", use_container_width=True)
+    b2.button("Today", on_click=reset_to_this_month, help="Go to the current month", use_container_width=True)
+    b3.button("▶", on_click=shift_month, args=(1,), help="Next month", use_container_width=True)
+
+
 # ------------------------------------------------------------- dashboard
 def dashboard(user_id):
-    st.header("📊 Monthly Dashboard")
+    year, month = selected_period()
+    st.header(f"📊 Dashboard: {calendar.month_name[month]} {year}")
     df = db.get_transactions(user_id)
-    today = today_ist()
-
-    c1, c2 = st.columns(2)
-    years = sorted({today.year, *df["date"].dt.year.tolist()}, reverse=True)
-    year = c1.selectbox("Year", years)
-    month = c2.selectbox(
-        "Month", list(range(1, 13)), index=today.month - 1,
-        format_func=lambda m: calendar.month_name[m],
-    )
 
     in_month = df[(df["date"].dt.year == year) & (df["date"].dt.month == month)]
     prev_year, prev_month = (year - 1, 12) if month == 1 else (year, month - 1)
@@ -226,7 +252,12 @@ def add_page(user_id):
         if flash:
             (st.success if flash[0] == "success" else st.error)(flash[1])
 
-    st.session_state.setdefault("add_date", today_ist())
+    period = selected_period()
+    if st.session_state.get("_add_period") != period:      # month changed (or first visit): set a sensible date
+        st.session_state["_add_period"] = period
+        today = today_ist()
+        last_day = date(period[0], period[1], calendar.monthrange(*period)[1])
+        st.session_state["add_date"] = today if (period == (today.year, today.month)) else min(last_day, today)
     tx_type = st.radio("Type", ["Expense", "Income"], horizontal=True, key="add_type")
     categories = EXPENSE_CATEGORIES if tx_type == "Expense" else INCOME_CATEGORIES
     with st.form("add_form", clear_on_submit=True):
@@ -244,6 +275,7 @@ def add_page(user_id):
             db.add_transaction(user_id, tx_date, tx_type, category, amount, method, note.strip())
             st.session_state["add_saved"] = f"{tx_type} of {money(amount)} saved under {category}."
             st.session_state["_clear_sms"] = True
+            st.session_state["_add_period"] = None          # re-apply the date for the selected month
             st.rerun()
 
 
@@ -257,15 +289,23 @@ def transactions_page(user_id):
 
     with st.expander("🔍 Filters", expanded=True):
         f1, f2, f3 = st.columns(3)
+        year, month = selected_period()
         min_d, max_d = all_df["date"].min().date(), max(all_df["date"].max().date(), today_ist())
-        rng = f1.date_input("Date range", value=(min_d, max_d), min_value=min_d, max_value=max_d)
+        mode = f1.selectbox("Period", ["Selected month", "All time", "Custom range"], key="tx_period_mode")
+        f1.caption(f"Selected month: {calendar.month_name[month]} {year}")
         tx_type = f2.selectbox("Type", ["All", "Income", "Expense"])
         cats = f3.multiselect("Categories", ALL_CATEGORIES)
+        if mode == "Custom range":
+            rng = st.date_input("Date range", value=(min_d, max_d), min_value=min_d, max_value=max_d, key="tx_range")
+            start, end = (rng[0], rng[1]) if isinstance(rng, tuple) and len(rng) == 2 else (min_d, max_d)
+        elif mode == "Selected month":
+            start, end = date(year, month, 1), date(year, month, calendar.monthrange(year, month)[1])
+        else:
+            start, end = None, None
         s1, s2 = st.columns(2)
         search = s1.text_input("Search notes / category")
         sort_by = s2.selectbox("Sort by", ["Newest first", "Oldest first", "Highest amount", "Lowest amount"])
 
-    start, end = (rng[0], rng[1]) if isinstance(rng, tuple) and len(rng) == 2 else (min_d, max_d)
     df = db.get_transactions(user_id, start, end, tx_type, cats, search.strip() or None)
     sort_map = {
         "Newest first": ("date", False), "Oldest first": ("date", True),
@@ -345,13 +385,13 @@ def budgets_page(user_id):
         st.info("No budgets set yet.")
         return
 
-    today = today_ist()
+    year, month = selected_period()
     df = db.get_transactions(user_id)
-    this_month = df[(df["date"].dt.year == today.year) & (df["date"].dt.month == today.month)
+    this_month = df[(df["date"].dt.year == year) & (df["date"].dt.month == month)
                     & (df["type"] == "Expense")]
     spent = this_month.groupby("category")["amount"].sum()
 
-    st.subheader(f"Progress for {calendar.month_name[today.month]} {today.year}")
+    st.subheader(f"Progress for {calendar.month_name[month]} {year}")
     for _, b in budgets.iterrows():
         s = float(spent.get(b["category"], 0.0))
         pct = s / b["monthly_limit"]
@@ -416,8 +456,12 @@ def main():
         st.title("💰 Expense Tracker")
         st.write(f"Logged in as **{user['username']}**")
         page = st.radio("Menu", ["Dashboard", "Add Transaction", "Transactions", "Budgets", "Import / Export"])
+        st.divider()
+        period_selector(user["id"])
+        st.divider()
         if st.button("Logout"):
-            del st.session_state["user"]
+            for key in ("user", "sel_year", "sel_month", "_add_period"):
+                st.session_state.pop(key, None)
             st.rerun()
 
     {
